@@ -7,9 +7,25 @@
 
     div(v-if="editingEvent")
       EventEditor(:event="editingEvent" :bucket_id="editingEventBucket" @saved="onEventSaved")
+
+    // Right-click menu on an event
+    div.dropdown-menu.show.timeline-context-menu(v-if="contextMenu", :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }", @contextmenu.prevent="closeContextMenu")
+      button.dropdown-item(type="button", :disabled="!contextMenu.canAssign", @click="openAssignCategory")
+        | Assign category...
+      button.dropdown-item(type="button", :disabled="!contextMenu.canEdit", @click="openEditorFromMenu")
+        | Edit event...
+      small.dropdown-item-text.text-muted(v-if="!contextMenu.canAssign")
+        | Only single, unmerged events can be assigned.
+
+    AssignCategoryModal(ref="assignCategoryModal", :event="assigningEvent", :bucket="assigningBucket", @assigned="onCategoryAssigned")
 </template>
 
 <style lang="scss">
+.timeline-context-menu {
+  position: fixed;
+  z-index: 1050;
+}
+
 div#visualization {
   margin-top: 0.5em;
   margin-bottom: 0.5em;
@@ -61,7 +77,12 @@ import _ from 'lodash';
 import moment from 'moment';
 import Color from 'color';
 import { buildTooltip } from '../util/tooltip.js';
-import { getCategoryColorFromEvent, getTitleAttr } from '../util/color';
+import {
+  getCategoryColorFromEvent,
+  getCategorizationStringFromEvent,
+  getTitleAttr,
+} from '../util/color';
+import { MANUAL_CATEGORY_KEY, manualCategoryValue } from '../util/manualCategory';
 import { getSwimlane } from '../util/swimlane.js';
 import { IEvent } from '../util/interfaces';
 import { formatTimelineBucketLabelHtml, shortenBucketLabel } from '../util/timelineLabels';
@@ -69,6 +90,7 @@ import { formatTimelineBucketLabelHtml, shortenBucketLabel } from '../util/timel
 import { Timeline } from 'vis-timeline/esnext';
 import 'vis-timeline/styles/vis-timeline-graph2d.css';
 import EventEditor from '~/components/EventEditor.vue';
+import AssignCategoryModal from '~/components/AssignCategoryModal.vue';
 
 const PIXELS_PER_WHEEL_LINE = 40;
 const PIXELS_PER_WHEEL_PAGE = 800;
@@ -86,6 +108,7 @@ interface IChartDataItem {
 export default {
   components: {
     EventEditor,
+    AssignCategoryModal,
   },
   props: {
     buckets: { type: Array },
@@ -123,6 +146,11 @@ export default {
       editingEventBucket: null,
       eventOverrides: {} as Record<string, IEvent>,
       pendingWindowRestore: null as { start: Date; end: Date } | null,
+
+      // { x, y, index, canAssign, canEdit } while the right-click menu is open
+      contextMenu: null,
+      assigningEvent: null,
+      assigningBucket: null,
 
       updateHasRun: false,
     };
@@ -210,6 +238,10 @@ export default {
           this.onSelect(properties);
         }
       });
+      this.timeline.on('contextmenu', this.onContextMenu);
+      document.addEventListener('click', this.closeContextMenu);
+      document.addEventListener('keydown', this.onKeydown);
+      window.addEventListener('scroll', this.closeContextMenu, true);
 
       this.ensureUpdate();
     });
@@ -219,6 +251,9 @@ export default {
     if (el) {
       el.removeEventListener('wheel', this.onHorizontalWheel, { capture: true });
     }
+    document.removeEventListener('click', this.closeContextMenu);
+    document.removeEventListener('keydown', this.onKeydown);
+    window.removeEventListener('scroll', this.closeContextMenu, true);
   },
   methods: {
     onHorizontalWheel: function (event: WheelEvent) {
@@ -242,6 +277,83 @@ export default {
       });
       event.preventDefault();
       event.stopImmediatePropagation();
+    },
+    findBucket(bucketId: string) {
+      return _.find(this.bucketsFromEither, b => b.id == bucketId);
+    },
+    // Events from merged/query results have no id and can't be written back
+    isEditable(event: IEvent & { id?: number }, bucketId: string): boolean {
+      return !!event.id && !!bucketId && bucketId !== 'events' && bucketId !== 'search';
+    },
+    onContextMenu: function (properties) {
+      if (properties.item === null || properties.item === undefined) {
+        this.closeContextMenu();
+        return;
+      }
+      properties.event.preventDefault();
+      const index = Number(properties.item);
+      const item = this.chartData[index];
+      if (!item) return;
+      const bucket = this.findBucket(item.bucketId);
+      const canEdit = this.isEditable(item.event, item.bucketId);
+      this.contextMenu = {
+        // Keep the menu inside the viewport
+        x: Math.min(properties.event.clientX, window.innerWidth - 220),
+        y: Math.min(properties.event.clientY, window.innerHeight - 120),
+        index,
+        canEdit,
+        canAssign:
+          canEdit && !!bucket && getCategorizationStringFromEvent(bucket, item.event) !== null,
+      };
+    },
+    closeContextMenu: function () {
+      this.contextMenu = null;
+    },
+    onKeydown: function (event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        this.closeContextMenu();
+      }
+    },
+    openEditorFromMenu: function () {
+      const index = this.contextMenu.index;
+      this.closeContextMenu();
+      this.onSelect({ items: [String(index)] });
+    },
+    openAssignCategory: async function () {
+      const item = this.chartData[this.contextMenu.index];
+      this.closeContextMenu();
+      // Fetch the full event, it may be cut off by the query range
+      this.assigningEvent = await this.$aw.getEvent(item.bucketId, item.event.id);
+      this.assigningBucket = this.findBucket(item.bucketId);
+      this.$nextTick(() => this.$refs.assignCategoryModal.show());
+    },
+    onCategoryAssigned: function ({ category }: { category: string[] | null }) {
+      // Recolor the event right away instead of waiting for a refresh
+      const id = this.assigningEvent.id;
+      const bucketId = this.assigningBucket.id;
+      _.each(this.chartData, (item: IChartDataItem, i: number) => {
+        const e = item.event as IEvent & { id?: number };
+        if (item.bucketId !== bucketId || e.id !== id) return;
+        if (category) {
+          e.data[MANUAL_CATEGORY_KEY] = manualCategoryValue(category);
+        } else {
+          delete e.data[MANUAL_CATEGORY_KEY];
+        }
+        const bucket = this.findBucket(bucketId);
+        item.color = getCategoryColorFromEvent(bucket, e);
+        item.tooltip = buildTooltip(bucket, e);
+        const style = `background-color: ${item.color}; border-color: ${Color(item.color).darken(
+          0.3
+        )}`;
+        const visItem = this.items[i];
+        if (visItem) {
+          visItem.style = style;
+          visItem.title = item.tooltip;
+          if (this.timeline.itemsData) {
+            this.timeline.itemsData.update({ id: visItem.id, style, title: item.tooltip });
+          }
+        }
+      });
     },
     openEditor: function () {
       this.$bvModal.show('edit-modal-' + this.editingEvent.id);
@@ -271,7 +383,7 @@ export default {
         const bucketId = _.find(this.groups, g => g.id == groupId).id;
 
         // Skip editing if event has no ID (e.g. merged query results) or bucket is a placeholder
-        if (!event.id || !bucketId || bucketId === 'events' || bucketId === 'search') {
+        if (!this.isEditable(event, bucketId)) {
           console.log(
             'Event has no ID or bucket is a placeholder, skipping editor',
             event,

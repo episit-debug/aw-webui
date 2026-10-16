@@ -2,6 +2,7 @@ import _ from 'lodash';
 import { IEvent } from './interfaces';
 import { useSettingsStore } from '~/stores/settings';
 import { getPresetCategorySets } from '~/util/presetCategories';
+import { findManualCategory } from '~/util/manualCategory';
 
 const level_sep = '>';
 export const CLASSIFY_KEYS = ['app', 'title'] as const;
@@ -535,6 +536,12 @@ export function matchString(
     categories = loadClasses();
   }
 
+  // A manually assigned category always wins over the rules
+  const manual = findManualCategory(event, categories);
+  if (manual) {
+    return manual;
+  }
+
   // Compile regexes
   const regexes: [Category, RegExp][] = categories.filter(hasMatchableRegex).map(c => {
     // using 'm' flag to make `$` and `^` in rules work
@@ -568,6 +575,11 @@ export function classifyEvents(events: IEvent[], categories: Category[]): IEvent
   });
 
   return events.map((e: IEvent) => {
+    const manual = findManualCategory(e, categories);
+    if (manual) {
+      e.data.$category = manual.name;
+      return e;
+    }
     const matchingCats = regexes.filter(([category, re]) => {
       const keys = normalizeSelectKeys(category.rule.select_keys) || CLASSIFY_KEYS;
       return keys.some(key => {

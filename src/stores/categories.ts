@@ -14,6 +14,7 @@ import {
   hasMatchableRegex,
 } from '~/util/classes';
 import { getColorFromCategory } from '~/util/color';
+import { manualCategoryRules } from '~/util/manualCategory';
 import { defineStore } from 'pinia';
 
 interface State {
@@ -184,8 +185,9 @@ export const useCategoryStore = defineStore('categories', {
           // 'none' so every server treats them the same way.
           const rule: Rule =
             c.rule.type === 'regex' && !hasMatchableRegex(c) ? { type: 'none' } : c.rule;
-          return [c.name, rule];
-        });
+          return [c.name, rule] as [string[], Rule];
+        })
+        .concat(manualCategoryRules(this.all_categories));
     },
     all_categories(): string[][] {
       // Returns a list of category names (a list of list of strings)
