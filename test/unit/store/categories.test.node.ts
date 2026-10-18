@@ -50,10 +50,20 @@ describe('categories store', () => {
       { name: ['Work'], rule: { type: 'regex', regex: '' } },
       { name: ['Work', 'Programming'], rule: { type: 'regex', regex: 'vim' } },
     ]);
-    expect(categoryStore.classes_for_query).toEqual([
+    // The trailing rules apply manual assignments (see util/manualCategory.ts)
+    expect(categoryStore.classes_for_query.slice(0, 2)).toEqual([
       [['Work'], { type: 'none' }],
       [['Work', 'Programming'], { type: 'regex', regex: 'vim' }],
     ]);
+  });
+
+  test('classes_for_query appends one manual-assignment rule per category', () => {
+    categoryStore.load([{ name: ['Work', 'Programming'], rule: { type: 'regex', regex: 'vim' } }]);
+    const manual = categoryStore.classes_for_query.filter(
+      ([, rule]) => rule.select_keys && rule.select_keys.includes('$manual_category')
+    );
+    expect(manual.map(([name]) => name)).toEqual([['Work'], ['Work', 'Programming']]);
+    expect(manual[1][1]).toMatchObject({ regex: '^Work>Programming$', type: 'regex' });
   });
 
   test('updateClass preserves regex select_keys', () => {
